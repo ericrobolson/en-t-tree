@@ -33,8 +33,9 @@ public readonly struct Entity : IEquatable<Entity>, IComparable<Entity>
     const int IndexBits = 20;
     const int GenerationBits = 12;
     const uint IndexMask = (1u << IndexBits) - 1;
-    const uint GenerationMask = (1u << GenerationBits) - 1;
+    internal const uint GenerationMask = (1u << GenerationBits) - 1;
     internal const int MaxEntities = (1 << IndexBits);
+    internal const int MaxGenerations = (1 << GenerationBits);
 
     /// <summary>The raw packed identifier.</summary>
     public readonly uint Id;
@@ -103,9 +104,108 @@ public readonly struct Entity : IEquatable<Entity>, IComparable<Entity>
     public static bool operator >=(Entity a, Entity b) => a.Id >= b.Id;
 }
 
+/// <summary>
+/// Manages entity lifecycle and component storage. Entities are created and destroyed
+/// through the registry, and components are attached, queried, and removed by type.
+/// </summary>
 public class Registry
 {
+    int _nextIndex;
+    readonly Stack<int> _freeList = new();
+    readonly int[] _generations = new int[Entity.MaxEntities];
+    IComponentPool[] _pools = [];
 
+    /// <summary>Registers a component type for use. Must be called before any Get/Set/Has/Remove for that type.</summary>
+    public void Register<T>() where T : struct
+    {
+        int id = ComponentId<T>.Value;
+        if (id >= _pools.Length)
+            Array.Resize(ref _pools, id + 1);
+        _pools[id] = new ComponentPool<T>();
+    }
+
+    /// <summary>Creates a new entity, reusing a recycled index if available.</summary>
+    public Entity Create()
+    {
+        if (_freeList.Count == 0 && _nextIndex >= Entity.MaxEntities)
+            throw new InvalidOperationException("Entity limit reached");
+
+        var idx = _nextIndex;
+        if (_freeList.Count > 0)
+        {
+            idx = _freeList.Pop();
+        }
+        else
+        {
+            _nextIndex++;
+        }
+
+        return new Entity(idx, _generations[idx]);
+    }
+
+    /// <summary>Destroys an entity, removing it from all pools and recycling its index.</summary>
+    public void Destroy(Entity e)
+    {
+        AssertAlive(e);
+        foreach (var pool in _pools)
+        {
+            pool?.Remove(e);
+        }
+
+        var idx = e.Index;
+        _generations[idx] = (int)((_generations[idx] + 1) & Entity.GenerationMask);
+        _freeList.Push(idx);
+    }
+
+    /// <summary>Returns whether the entity handle is still valid.</summary>
+    public bool IsAlive(Entity e)
+    {
+        return _generations[e.Index] == e.Generation;
+    }
+
+    /// <summary>Returns the component of type T for the given entity.</summary>
+    public T Get<T>(Entity e) where T : struct
+    {
+        AssertAlive(e);
+        return GetPool<T>().Get(e);
+    }
+
+    /// <summary>Adds or updates the component of type T on the given entity.</summary>
+    public void Set<T>(Entity e, T component) where T : struct
+    {
+        AssertAlive(e);
+        GetPool<T>().Set(e, component);
+    }
+
+    /// <summary>Returns whether the entity has a component of type T.</summary>
+    public bool Has<T>(Entity e) where T : struct
+    {
+        AssertAlive(e);
+        return GetPool<T>().Has(e);
+    }
+
+    /// <summary>Removes the component of type T from the given entity.</summary>
+    public void Remove<T>(Entity e) where T : struct
+    {
+        AssertAlive(e);
+        GetPool<T>().Remove(e);
+    }
+
+    /// <summary>Returns the typed pool for T, throwing if unregistered.</summary>
+    private ComponentPool<T> GetPool<T>() where T : struct
+    {
+        int id = ComponentId<T>.Value;
+        if (id >= _pools.Length || _pools[id] == null)
+            throw new InvalidOperationException($"{typeof(T).Name} has not been registered");
+        return (ComponentPool<T>)_pools[id];
+    }
+
+    /// <summary>Throws if the entity handle is stale.</summary>
+    private void AssertAlive(Entity e)
+    {
+        if (_generations[e.Index] != e.Generation)
+            throw new InvalidOperationException($"{e} is stale (current generation: {_generations[e.Index]})");
+    }
 }
 
 /// <summary>
@@ -132,11 +232,17 @@ internal static class ComponentIdCounter
     public static int Count => _next;
 }
 
+internal interface IComponentPool
+{
+    void Remove(Entity e);
+    bool Has(Entity e);
+}
+
 /// <summary>
 /// Sparse-set storage for a single component type. Provides O(1) add, remove, lookup,
 /// and cache-friendly iteration over packed dense arrays.
 /// </summary>
-internal class ComponentPool<T> where T : struct
+internal class ComponentPool<T> : IComponentPool where T : struct
 {
     readonly T[] _dense = new T[Entity.MaxEntities];
     readonly int[] _denseEntities = new int[Entity.MaxEntities];
