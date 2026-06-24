@@ -34,8 +34,8 @@ public readonly struct Entity : IEquatable<Entity>, IComparable<Entity>
     const int GenerationBits = 12;
     const uint IndexMask = (1u << IndexBits) - 1;
     internal const uint GenerationMask = (1u << GenerationBits) - 1;
-    internal const int MaxEntities = (1 << IndexBits);
-    internal const int MaxGenerations = (1 << GenerationBits);
+    internal const int MaxEntities = 1 << IndexBits;
+    internal const int MaxGenerations = 1 << GenerationBits;
 
     /// <summary>The raw packed identifier.</summary>
     public readonly uint Id;
@@ -158,10 +158,7 @@ public class Registry
     }
 
     /// <summary>Returns whether the entity handle is still valid.</summary>
-    public bool IsAlive(Entity e)
-    {
-        return _generations[e.Index] == e.Generation;
-    }
+    public bool IsAlive(Entity e) => _generations[e.Index] == e.Generation;
 
     /// <summary>Returns the component of type T for the given entity.</summary>
     public T Get<T>(Entity e) where T : struct
@@ -191,7 +188,34 @@ public class Registry
         GetPool<T>().Remove(e);
     }
 
-    /// <summary>Returns the typed pool for T, throwing if unregistered.</summary>
+    /// <summary>Creates a view over all entities with component types A and B.</summary>
+    public View<A, B> View<A, B>() where A : struct where B : struct
+        => new(GetPool<A>(), GetPool<B>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A, B, and C.</summary>
+    public View<A, B, C> View<A, B, C>() where A : struct where B : struct where C : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A through D.</summary>
+    public View<A, B, C, D> View<A, B, C, D>() where A : struct where B : struct where C : struct where D : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), GetPool<D>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A through E.</summary>
+    public View<A, B, C, D, E> View<A, B, C, D, E>() where A : struct where B : struct where C : struct where D : struct where E : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), GetPool<D>(), GetPool<E>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A through F.</summary>
+    public View<A, B, C, D, E, F> View<A, B, C, D, E, F>() where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), GetPool<D>(), GetPool<E>(), GetPool<F>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A through G.</summary>
+    public View<A, B, C, D, E, F, G> View<A, B, C, D, E, F, G>() where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct where G : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), GetPool<D>(), GetPool<E>(), GetPool<F>(), GetPool<G>(), _generations);
+
+    /// <summary>Creates a view over all entities with component types A through H.</summary>
+    public View<A, B, C, D, E, F, G, H> View<A, B, C, D, E, F, G, H>() where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct where G : struct where H : struct
+        => new(GetPool<A>(), GetPool<B>(), GetPool<C>(), GetPool<D>(), GetPool<E>(), GetPool<F>(), GetPool<G>(), GetPool<H>(), _generations);
+
     private ComponentPool<T> GetPool<T>() where T : struct
     {
         int id = ComponentId<T>.Value;
@@ -200,7 +224,6 @@ public class Registry
         return (ComponentPool<T>)_pools[id];
     }
 
-    /// <summary>Throws if the entity handle is stale.</summary>
     private void AssertAlive(Entity e)
     {
         if (_generations[e.Index] != e.Generation)
@@ -208,19 +231,18 @@ public class Registry
     }
 }
 
-/// <summary>
-/// Provides a unique integer ID for each component type, assigned on first access.
-/// Uses a static generic class so each T gets its own static field.
-/// </summary>
+// ---------------------------------------------------------------------------
+// Internal infrastructure
+// ---------------------------------------------------------------------------
+
+/// <summary>Assigns a unique integer ID to each component type on first access.</summary>
 internal static class ComponentId<T> where T : struct
 {
     /// <summary>The unique integer ID for component type T.</summary>
     public static readonly int Value = ComponentIdCounter.Next();
 }
 
-/// <summary>
-/// Thread-safe counter backing <see cref="ComponentId{T}"/>.
-/// </summary>
+/// <summary>Thread-safe counter backing <see cref="ComponentId{T}"/>.</summary>
 internal static class ComponentIdCounter
 {
     static int _next;
@@ -232,10 +254,23 @@ internal static class ComponentIdCounter
     public static int Count => _next;
 }
 
+/// <summary>Non-generic interface for component pools, used by Registry.Destroy and View driver selection.</summary>
 internal interface IComponentPool
 {
+    /// <summary>The number of live components in this pool.</summary>
+    int Count { get; }
+
+    /// <summary>Removes the component for the given entity. No-op if absent.</summary>
     void Remove(Entity e);
+
+    /// <summary>Returns whether the entity has a component in this pool.</summary>
     bool Has(Entity e);
+
+    /// <summary>Returns whether the given raw index has a component in this pool.</summary>
+    bool HasByIndex(int index);
+
+    /// <summary>Returns the entity index at the given dense array position.</summary>
+    int GetEntityIndex(int denseIndex);
 }
 
 /// <summary>
@@ -249,7 +284,7 @@ internal class ComponentPool<T> : IComponentPool where T : struct
     readonly int[] _sparse = new int[Entity.MaxEntities];
     int _count;
 
-    /// <summary>The number of live components in the pool.</summary>
+    /// <inheritdoc />
     public int Count => _count;
 
     public ComponentPool()
@@ -257,7 +292,23 @@ internal class ComponentPool<T> : IComponentPool where T : struct
         Array.Fill(_sparse, -1);
     }
 
-    /// <summary>Returns whether the entity has a component in this pool.</summary>
+    /// <inheritdoc />
+    public int GetEntityIndex(int denseIndex) => _denseEntities[denseIndex];
+
+    /// <summary>Returns the component at the given dense array position.</summary>
+    public T GetByDenseIndex(int denseIndex) => _dense[denseIndex];
+
+    /// <inheritdoc />
+    public bool HasByIndex(int index)
+    {
+        var value = _sparse[index];
+        return value >= 0 && value < _count;
+    }
+
+    /// <summary>Returns the component for the given raw index. Caller must ensure HasByIndex is true.</summary>
+    public T GetByIndex(int index) => _dense[_sparse[index]];
+
+    /// <inheritdoc />
     public bool Has(Entity e)
     {
         var value = _sparse[e.Index];
@@ -290,7 +341,7 @@ internal class ComponentPool<T> : IComponentPool where T : struct
         }
     }
 
-    /// <summary>Removes the component for the given entity via swap-and-pop. No-op if absent.</summary>
+    /// <inheritdoc />
     public void Remove(Entity e)
     {
         if (!Has(e))
@@ -304,5 +355,482 @@ internal class ComponentPool<T> : IComponentPool where T : struct
         _sparse[swap] = _sparse[idx];
         _sparse[idx] = -1;
         _count--;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View helpers
+// ---------------------------------------------------------------------------
+
+/// <summary>Shared utility for view driver selection.</summary>
+internal static class ViewHelper
+{
+    /// <summary>Returns the index of the pool with the fewest entities.</summary>
+    public static int SmallestPool(ReadOnlySpan<IComponentPool> pools)
+    {
+        int min = 0;
+        for (int i = 1; i < pools.Length; i++)
+        {
+            if (pools[i].Count < pools[min].Count)
+                min = i;
+        }
+        return min;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Views (arities 2-8)
+// ---------------------------------------------------------------------------
+
+/// <summary>Iterates all entities that have component types A and B.</summary>
+public readonly struct View<A, B> where A : struct where B : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly int[] _generations;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, int[] generations)
+    {
+        _poolA = poolA;
+        _poolB = poolB;
+        _generations = generations;
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _generations);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly int[] _generations;
+        readonly int _driverCount;
+        readonly bool _aIsDriver;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, int[] generations)
+        {
+            _poolA = poolA;
+            _poolB = poolB;
+            _generations = generations;
+            _aIsDriver = poolA.Count <= poolB.Count;
+            _driverCount = _aIsDriver ? poolA.Count : poolB.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B) tuple.</summary>
+        public (Entity Entity, A A, B B) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has both components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                if (_aIsDriver)
+                {
+                    int ei = _poolA.GetEntityIndex(_denseIndex);
+                    if (!_poolB.HasByIndex(ei)) continue;
+                    Current = (new Entity(ei, _generations[ei]), _poolA.GetByDenseIndex(_denseIndex), _poolB.GetByIndex(ei));
+                    return true;
+                }
+                else
+                {
+                    int ei = _poolB.GetEntityIndex(_denseIndex);
+                    if (!_poolA.HasByIndex(ei)) continue;
+                    Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByDenseIndex(_denseIndex));
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A, B, and C.</summary>
+public readonly struct View<A, B, C> where A : struct where B : struct where C : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, int[] generations)
+    {
+        _poolA = poolA;
+        _poolB = poolB;
+        _poolC = poolC;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, int[] generations, int driverIndex)
+        {
+            _poolA = poolA;
+            _poolB = poolB;
+            _poolC = poolC;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C) tuple.</summary>
+        public (Entity Entity, A A, B B, C C) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all three components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A through D.</summary>
+public readonly struct View<A, B, C, D> where A : struct where B : struct where C : struct where D : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly ComponentPool<D> _poolD;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, int[] generations)
+    {
+        _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC, poolD]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C, D) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _poolD, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C, D&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly ComponentPool<D> _poolD;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, int[] generations, int driverIndex)
+        {
+            _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC, poolD];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C, D) tuple.</summary>
+        public (Entity Entity, A A, B B, C C, D D) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all four components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei) || !_poolD.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei), _poolD.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A through E.</summary>
+public readonly struct View<A, B, C, D, E> where A : struct where B : struct where C : struct where D : struct where E : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly ComponentPool<D> _poolD;
+    readonly ComponentPool<E> _poolE;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, int[] generations)
+    {
+        _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC, poolD, poolE]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C, D, E) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _poolD, _poolE, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C, D, E&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly ComponentPool<D> _poolD;
+        readonly ComponentPool<E> _poolE;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, int[] generations, int driverIndex)
+        {
+            _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC, poolD, poolE];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C, D, E) tuple.</summary>
+        public (Entity Entity, A A, B B, C C, D D, E E) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all five components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei) || !_poolD.HasByIndex(ei) || !_poolE.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei), _poolD.GetByIndex(ei), _poolE.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A through F.</summary>
+public readonly struct View<A, B, C, D, E, F> where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly ComponentPool<D> _poolD;
+    readonly ComponentPool<E> _poolE;
+    readonly ComponentPool<F> _poolF;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, int[] generations)
+    {
+        _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC, poolD, poolE, poolF]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C, D, E, F) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _poolD, _poolE, _poolF, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C, D, E, F&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly ComponentPool<D> _poolD;
+        readonly ComponentPool<E> _poolE;
+        readonly ComponentPool<F> _poolF;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, int[] generations, int driverIndex)
+        {
+            _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC, poolD, poolE, poolF];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C, D, E, F) tuple.</summary>
+        public (Entity Entity, A A, B B, C C, D D, E E, F F) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all six components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei) || !_poolD.HasByIndex(ei) || !_poolE.HasByIndex(ei) || !_poolF.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei), _poolD.GetByIndex(ei), _poolE.GetByIndex(ei), _poolF.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A through G.</summary>
+public readonly struct View<A, B, C, D, E, F, G> where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct where G : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly ComponentPool<D> _poolD;
+    readonly ComponentPool<E> _poolE;
+    readonly ComponentPool<F> _poolF;
+    readonly ComponentPool<G> _poolG;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, ComponentPool<G> poolG, int[] generations)
+    {
+        _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF; _poolG = poolG;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC, poolD, poolE, poolF, poolG]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C, D, E, F, G) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _poolD, _poolE, _poolF, _poolG, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C, D, E, F, G&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly ComponentPool<D> _poolD;
+        readonly ComponentPool<E> _poolE;
+        readonly ComponentPool<F> _poolF;
+        readonly ComponentPool<G> _poolG;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, ComponentPool<G> poolG, int[] generations, int driverIndex)
+        {
+            _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF; _poolG = poolG;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC, poolD, poolE, poolF, poolG];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C, D, E, F, G) tuple.</summary>
+        public (Entity Entity, A A, B B, C C, D D, E E, F F, G G) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all seven components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei) || !_poolD.HasByIndex(ei) || !_poolE.HasByIndex(ei) || !_poolF.HasByIndex(ei) || !_poolG.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei), _poolD.GetByIndex(ei), _poolE.GetByIndex(ei), _poolF.GetByIndex(ei), _poolG.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+/// <summary>Iterates all entities that have component types A through H.</summary>
+public readonly struct View<A, B, C, D, E, F, G, H> where A : struct where B : struct where C : struct where D : struct where E : struct where F : struct where G : struct where H : struct
+{
+    readonly ComponentPool<A> _poolA;
+    readonly ComponentPool<B> _poolB;
+    readonly ComponentPool<C> _poolC;
+    readonly ComponentPool<D> _poolD;
+    readonly ComponentPool<E> _poolE;
+    readonly ComponentPool<F> _poolF;
+    readonly ComponentPool<G> _poolG;
+    readonly ComponentPool<H> _poolH;
+    readonly int[] _generations;
+    readonly int _driverIndex;
+
+    internal View(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, ComponentPool<G> poolG, ComponentPool<H> poolH, int[] generations)
+    {
+        _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF; _poolG = poolG; _poolH = poolH;
+        _generations = generations;
+        _driverIndex = ViewHelper.SmallestPool([poolA, poolB, poolC, poolD, poolE, poolF, poolG, poolH]);
+    }
+
+    /// <summary>Returns an enumerator that yields (Entity, A, B, C, D, E, F, G, H) tuples.</summary>
+    public Enumerator GetEnumerator() => new(_poolA, _poolB, _poolC, _poolD, _poolE, _poolF, _poolG, _poolH, _generations, _driverIndex);
+
+    /// <summary>Stack-allocated enumerator for View&lt;A, B, C, D, E, F, G, H&gt;.</summary>
+    public struct Enumerator
+    {
+        readonly ComponentPool<A> _poolA;
+        readonly ComponentPool<B> _poolB;
+        readonly ComponentPool<C> _poolC;
+        readonly ComponentPool<D> _poolD;
+        readonly ComponentPool<E> _poolE;
+        readonly ComponentPool<F> _poolF;
+        readonly ComponentPool<G> _poolG;
+        readonly ComponentPool<H> _poolH;
+        readonly int[] _generations;
+        readonly IComponentPool _driver;
+        readonly int _driverCount;
+        int _denseIndex;
+
+        internal Enumerator(ComponentPool<A> poolA, ComponentPool<B> poolB, ComponentPool<C> poolC, ComponentPool<D> poolD, ComponentPool<E> poolE, ComponentPool<F> poolF, ComponentPool<G> poolG, ComponentPool<H> poolH, int[] generations, int driverIndex)
+        {
+            _poolA = poolA; _poolB = poolB; _poolC = poolC; _poolD = poolD; _poolE = poolE; _poolF = poolF; _poolG = poolG; _poolH = poolH;
+            _generations = generations;
+            IComponentPool[] pools = [poolA, poolB, poolC, poolD, poolE, poolF, poolG, poolH];
+            _driver = pools[driverIndex];
+            _driverCount = _driver.Count;
+            _denseIndex = -1;
+        }
+
+        /// <summary>The current (Entity, A, B, C, D, E, F, G, H) tuple.</summary>
+        public (Entity Entity, A A, B B, C C, D D, E E, F F, G G, H H) Current { get; private set; }
+
+        /// <summary>Advances to the next entity that has all eight components.</summary>
+        public bool MoveNext()
+        {
+            while (++_denseIndex < _driverCount)
+            {
+                int ei = _driver.GetEntityIndex(_denseIndex);
+                if (!_poolA.HasByIndex(ei) || !_poolB.HasByIndex(ei) || !_poolC.HasByIndex(ei) || !_poolD.HasByIndex(ei) || !_poolE.HasByIndex(ei) || !_poolF.HasByIndex(ei) || !_poolG.HasByIndex(ei) || !_poolH.HasByIndex(ei))
+                    continue;
+                Current = (new Entity(ei, _generations[ei]), _poolA.GetByIndex(ei), _poolB.GetByIndex(ei), _poolC.GetByIndex(ei), _poolD.GetByIndex(ei), _poolE.GetByIndex(ei), _poolF.GetByIndex(ei), _poolG.GetByIndex(ei), _poolH.GetByIndex(ei));
+                return true;
+            }
+            return false;
+        }
     }
 }
